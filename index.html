@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+<title>LUMINA - Fantasy Action</title>
+<style>
+  :root{
+    --sky-day:#9ad9ff; --sky-even:#ffb36a; --sky-night:#0b1636;
+    --ground:#4caf50; --ui:#ffffffcc;
+    --pink:#ff7ab6; --gold:#ffd36a; --vio:#8fd3ff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#000;font-family:system-ui,-apple-system,"Segoe UI",sans-serif; color:#fff}
+  canvas{display:block;margin:0 auto;background:#000;touch-action:none}
+  #ui{position:fixed;left:0;right:0;top:0;pointer-events:none}
+  .panel{margin:8px;padding:6px 10px;border-radius:10px;background:var(--ui);color:#000;display:inline-flex;gap:8px;align-items:center}
+  #bottom{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:space-between;padding:10px;pointer-events:none}
+  .btn{pointer-events:auto;width:64px;height:64px;border-radius:50%;background:#ffffffaa;color:#000;
+       display:flex;align-items:center;justify-content:center;font-weight:700;box-shadow:0 6px 16px #0006}
+  .btn:active{transform:translateY(1px)}
+  #title{position:fixed;inset:0;background:linear-gradient(#0008,#000c);display:flex;align-items:center;justify-content:center}
+  #title .card{background:#111;border-radius:20px;padding:22px;max-width:92%;text-align:center;box-shadow:0 20px 60px #000}
+  #logo{font-size:36px;font-weight:900;letter-spacing:.08em;
+        background:linear-gradient(90deg,var(--gold),var(--pink),var(--vio));
+        -webkit-background-clip:text;background-clip:text;color:transparent}
+  .small{opacity:.85}
+  .hidden{display:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <div class="panel" id="hud">HP ❤️ <span id="hp"></span> ｜ Stage <span id="st"></span></div>
+</div>
+
+<div id="bottom">
+  <div class="btn" id="left">◀</div>
+  <div style="display:flex;gap:10px">
+    <div class="btn" id="jump">⤒</div>
+    <div class="btn" id="magic">✨</div>
+  </div>
+</div>
+
+<div id="title">
+  <div class="card">
+    <div id="logo">L U M I N A</div>
+    <p class="small">ファンタジー世界の女の子が、光の魔法で進む横スクロールアクション</p>
+    <p class="small">タップ：移動 / ジャンプ / 魔法</p>
+    <button class="btn" id="start" style="width:auto;border-radius:14px;padding:10px 16px">START</button>
+    <p class="small">セーブ対応</p>
+  </div>
+</div>
+
+<script>
+// ====== 基本 ======
+const cvs = document.getElementById('c'), ctx = cvs.getContext('2d');
+const uiHp = document.getElementById('hp'), uiSt = document.getElementById('st');
+const W = ()=> (cvs.width = innerWidth, cvs.height = innerHeight);
+W(); addEventListener('resize',W);
+
+// ====== サウンド（超軽量・疑似） ======
+const beep=(f=440,t=0.08)=>{try{
+  const a=new (window.AudioContext||webkitAudioContext)();
+  const o=a.createOscillator(), g=a.createGain();
+  o.frequency.value=f; o.type='sine';
+  g.gain.value=.04; o.connect(g).connect(a.destination);
+  o.start(); setTimeout(()=>{o.stop();a.close()},t*1000);
+}catch{}};
+
+// ====== ゲーム状態 ======
+let time=0, stage=1, dayPhase=0; // 0昼→1夕→2夜
+let cam=0, particles=[], enemies=[], boss=null;
+const saveKey='lumina-save';
+
+// ====== プレイヤー（表情わかる簡易ドット） ======
+const P={
+  x:100,y:0,vx:0,vy:0,w:28,h:40,ground:false,hp:5,face:0 // 0通常 1笑 2集中
+};
+
+// ====== 入力（スマホ） ======
+const key={L:0,J:0,M:0};
+['left','jump','magic'].forEach(id=>{
+  const el=document.getElementById(id);
+  el.addEventListener('touchstart',e=>{e.preventDefault(); key[id[0].toUpperCase()]=1});
+  el.addEventListener('touchend',e=>{e.preventDefault(); key[id[0].toUpperCase()]=0});
+});
+
+// ====== タイトル ======
+document.getElementById('start').onclick=()=>{
+  document.getElementById('title').classList.add('hidden');
+  load(); beep(660,.12);
+};
+
+// ====== セーブ/ロード ======
+function save(){
+  localStorage.setItem(saveKey, JSON.stringify({stage, hp:P.hp}));
+}
+function load(){
+  const s=localStorage.getItem(saveKey);
+  if(s){ const d=JSON.parse(s); stage=d.stage||1; P.hp=d.hp||5; }
+}
+
+// ====== ユーティリティ ======
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function sky(){
+  if(stage===2||dayPhase===2) return getCSS('--sky-night');
+  if(dayPhase===1) return getCSS('--sky-even');
+  return getCSS('--sky-day');
+}
+function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v)}
+
+// ====== エフェクト ======
+function sparkle(x,y,c='white',n=6){
+  for(let i=0;i<n;i++) particles.push({x,y,vx:(Math.random()-.5)*2,vy:-Math.random()*2,t:30,c});
+}
+
+// ====== 敵 ======
+function spawnEnemy(x){
+  enemies.push({x,y:0,w:26,h:26,hp:2});
+}
+
+// ====== ボス ======
+function spawnBoss(){
+  boss={x:cam+innerWidth-160,y:0,w:80,h:80,hp:20};
+}
+
+// ====== 更新 ======
+function update(){
+  time++;
+  // 昼夕夜
+  if(time%900===0) dayPhase=(dayPhase+1)%3;
+
+  // プレイヤー
+  P.vx = (key.L? -2:2); // 常に前進＋左調整
+  if(key.J && P.ground){ P.vy=-7; P.ground=false; beep(520,.06); }
+  if(key.M && time%10===0){ // 魔法
+    sparkle(P.x+P.w,P.y+10,'#ffd36a',10);
+    enemies.forEach(e=>{ if(Math.abs(e.x-P.x)<60){ e.hp--; }});
+    if(boss && Math.abs(boss.x-P.x)<90){ boss.hp--; }
+    beep(880,.05);
+  }
+  P.vy+=0.35;
+  P.x+=P.vx; P.y+=P.vy;
+  if(P.y>innerHeight-80){ P.y=innerHeight-80; P.vy=0; P.ground=true; }
+  cam = Math.max(0, P.x-120);
+
+  // ステージ進行
+  if(stage===1 && P.x>1800){ stage=2; enemies=[]; spawnEnemy(P.x+200); save(); }
+  if(stage===2 && !boss && P.x>3200){ spawnBoss(); }
+
+  // 敵
+  enemies=enemies.filter(e=>e.hp>0);
+  enemies.forEach(e=>{ e.x-=1; if(Math.abs(e.x-P.x)<24 && Math.abs(e.y-P.y)<30){ P.hp--; e.hp=0; save(); }});
+  if(boss){
+    boss.x-=0.6;
+    if(Math.abs(boss.x-P.x)<60){ P.hp--; }
+    if(boss.hp<=0){ boss=null; save(); }
+  }
+
+  // パーティクル
+  particles=particles.filter(p=>p.t-->0);
+  particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.vy+=.05; });
+}
+
+// ====== 描画 ======
+function draw(){
+  ctx.fillStyle=sky(); ctx.fillRect(0,0,cvs.width,cvs.height);
+
+  // 地面
+  ctx.fillStyle=getCSS('--ground');
+  ctx.fillRect(0,cvs.height-40,cvs.width,40);
+
+  // 背景（森/夜）
+  ctx.fillStyle= stage===2? '#123': '#3fa';
+  for(let i=0;i<10;i++){
+    ctx.fillRect((i*240-cam*.3)%cvs.width, cvs.height-120, 40, 80);
+  }
+
+  // プレイヤー
+  const px=P.x-cam, py=P.y;
+  ctx.fillStyle='#ffb6c1'; ctx.fillRect(px,py,P.w,P.h);
+  // 顔
+  ctx.fillStyle='#000'; ctx.fillRect(px+6,py+10,4,4); ctx.fillRect(px+18,py+10,4,4);
+  ctx.fillRect(px+10,py+22,8,2);
+
+  // 精霊
+  ctx.fillStyle='#9ff'; ctx.beginPath(); ctx.arc(px+30,py-10,6,0,Math.PI*2); ctx.fill();
+
+  // 敵
+  ctx.fillStyle='#f55';
+  enemies.forEach(e=>ctx.fillRect(e.x-cam,e.y+ (innerHeight-80), e.w,e.h));
+
+  // ボス
+  if(boss){
+    ctx.fillStyle='#a5f';
+    ctx.fillRect(boss.x-cam, boss.y+(innerHeight-120), boss.w,boss.h);
+  }
+
+  // 魔法粒子
+  particles.forEach(p=>{
+    ctx.fillStyle=p.c; ctx.fillRect(p.x-cam,p.y,2,2);
+  });
+
+  // UI
+  uiHp.textContent=P.hp; uiSt.textContent=stage;
+}
+
+// ====== ループ ======
+(function loop(){
+  update(); draw();
+  if(P.hp>0) requestAnimationFrame(loop);
+  else{
+    ctx.fillStyle='#000a'; ctx.fillRect(0,0,cvs.width,cvs.height);
+    ctx.fillStyle='#fff'; ctx.fillText('GAME OVER', cvs.width/2-40, cvs.height/2);
+    localStorage.removeItem(saveKey);
+  }
+})();
+</script>
+</body>
+</html>
